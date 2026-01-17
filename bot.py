@@ -2,15 +2,9 @@ import os
 import sys
 import asyncio
 import logging
-import time
-import hmac
-import hashlib
-import base64
-import json
-from typing import Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-import httpx
+from zhipuai import ZhipuAI
 
 # Set up logging
 logging.basicConfig(
@@ -23,9 +17,6 @@ logger = logging.getLogger(__name__)
 # Configuration
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-
-# GLM 4.7 Coding model name
 MODEL_NAME = os.getenv("GLM_MODEL", "glm-4.7")
 
 logger.info(f"GLM_API_KEY set: {bool(GLM_API_KEY)}")
@@ -33,105 +24,46 @@ logger.info(f"TELEGRAM_BOT_TOKEN set: {bool(TELEGRAM_BOT_TOKEN)}")
 logger.info(f"Using model: {MODEL_NAME}")
 
 
-def generate_glm_token(api_key: str, exp_seconds: int = 3600) -> str:
-    """
-    Generate JWT token for GLM API.
-    GLM API key format: id.secret
-    """
-    try:
-        parts = api_key.split(".")
-        if len(parts) != 2:
-            logger.warning("API key doesn't match expected 'id.secret' format, using as-is")
-            return api_key
-
-        api_id, api_secret = parts
-
-        # Header
-        header = {
-            "alg": "HS256",
-            "sign_type": "SIGN"
-        }
-
-        # Payload
-        now = int(time.time())
-        payload = {
-            "api_key": api_id,
-            "exp": now + exp_seconds,
-            "timestamp": now
-        }
-
-        # Encode header and payload
-        header_encoded = base64.urlsafe_b64encode(
-            json.dumps(header, separators=(',', ':')).encode()
-        ).rstrip(b'=').decode()
-
-        payload_encoded = base64.urlsafe_b64encode(
-            json.dumps(payload, separators=(',', ':')).encode()
-        ).rstrip(b'=').decode()
-
-        # Signature
-        message = f"{header_encoded}.{payload_encoded}"
-        signature = hmac.new(
-            api_secret.encode(),
-            message.encode(),
-            hashlib.sha256
-        ).digest()
-
-        signature_encoded = base64.urlsafe_b64encode(signature).rstrip(b'=').decode()
-
-        return f"{message}.{signature_encoded}"
-    except Exception as e:
-        logger.error(f"Error generating token: {e}")
-        return api_key
-
-
 async def call_glm_api(prompt: str) -> str:
-    """Call GLM API with the given prompt."""
+    """Call GLM API with the given prompt using official SDK."""
     if not GLM_API_KEY:
         return "Error: GLM_API_KEY not configured"
 
-    # Generate JWT token
-    token = generate_glm_token(GLM_API_KEY)
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 4096
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(GLM_API_URL, headers=headers, json=payload)
+        client = ZhipuAI(api_key=GLM_API_KEY)
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=4096,
+        )
 
-            logger.info(f"API response status: {response.status_code}")
+        logger.info(f"API call successful, model: {MODEL_NAME}")
 
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data and len(data["choices"]) > 0:
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    return f"Error: Unexpected response format: {data}"
-            else:
-                logger.error(f"API response: {response.text}")
-                return f"HTTP Error {response.status_code}: {response.text}"
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP Error: {e}")
-        return f"HTTP Error: {str(e)}"
+        if response.choices and len(response.choices) > 0:
+            return response.choices[0].message.content
+        else:
+            return "Error: No response from GLM API"
+
     except Exception as e:
         logger.error(f"Error calling GLM API: {e}")
+        # Check if it's an auth/balance error
+        error_str = str(e)
+        if "1113" in error_str or "余额" in error_str:
+            return "Error: API balance issue or invalid API key. Check your Zhipu AI console."
+        elif "1211" in error_str or "模型" in error_str:
+            return f"Error: Model '{MODEL_NAME}' not found. Check available models in your Zhipu AI console."
+        elif "401" in error_str or "auth" in error_str.lower():
+            return "Error: Authentication failed. Check your API key."
         return f"Error: {str(e)}"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
     welcome_message = (
-        "Hello! I'm a bot powered by GLM API.\n\n"
+        f"Hello! I'm a bot powered by {MODEL_NAME}.\n\n"
         "Just send me a message and I'll respond.\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
@@ -143,8 +75,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /help command."""
     help_message = (
-        "I can help you with coding questions using the GLM API.\n\n"
-        "Just send me any coding question or request, and I'll do my best to help!\n\n"
+        f"I can help you with questions using {MODEL_NAME}.\n\n"
+        "Just send me any question or request, and I'll do my best to help!\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
         "/help - Show this help message"
