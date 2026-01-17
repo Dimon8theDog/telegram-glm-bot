@@ -5,6 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from zai import ZaiClient
+from collections import defaultdict
 
 # Set up logging
 logging.basicConfig(
@@ -18,24 +19,35 @@ logger = logging.getLogger(__name__)
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MODEL_NAME = os.getenv("GLM_MODEL", "glm-4.7")
+MEMORY_LIMIT = int(os.getenv("MEMORY_LIMIT", "50"))  # Messages per user to remember
 
 logger.info(f"GLM_API_KEY set: {bool(GLM_API_KEY)}")
 logger.info(f"TELEGRAM_BOT_TOKEN set: {bool(TELEGRAM_BOT_TOKEN)}")
 logger.info(f"Using model: {MODEL_NAME}")
+logger.info(f"Memory limit: {MEMORY_LIMIT} messages per user")
+
+# In-memory conversation storage: {user_id: [{"role": "user"/"assistant", "content": "..."}]}
+conversation_memory = defaultdict(list)
 
 
-async def call_glm_api(prompt: str) -> str:
+async def call_glm_api(prompt: str, conversation_history: list = None) -> str:
     """Call GLM API with the given prompt using official zai-sdk for Coding Plan."""
     if not GLM_API_KEY:
         return "Error: GLM_API_KEY not configured"
 
     try:
         client = ZaiClient(api_key=GLM_API_KEY)
+
+        # Build messages: include conversation history if available
+        messages = []
+        if conversation_history:
+            messages.extend(conversation_history)
+        # Add current prompt
+        messages.append({"role": "user", "content": prompt})
+
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=4096,
         )
@@ -62,12 +74,15 @@ async def call_glm_api(prompt: str) -> str:
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
+    user_id = update.effective_user.id
     welcome_message = (
         f"Hello! I'm a bot powered by {MODEL_NAME}.\n\n"
-        "Just send me a message and I'll respond.\n\n"
+        "Just send me a message and I'll respond. I remember our conversation!\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
-        "/help - Show help message"
+        "/help - Show help message\n"
+        "/clear - Clear conversation memory\n"
+        "/memory - Show current memory usage"
     )
     await update.message.reply_text(welcome_message)
 
@@ -76,20 +91,55 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle the /help command."""
     help_message = (
         f"I can help you with questions using {MODEL_NAME}.\n\n"
-        "Just send me any question or request, and I'll do my best to help!\n\n"
+        "I remember our conversation (up to {MEMORY_LIMIT} messages), so feel free to refer back to things we discussed!\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
-        "/help - Show this help message"
+        "/help - Show this help message\n"
+        "/clear - Clear conversation memory\n"
+        "/memory - Show current memory usage"
     )
     await update.message.reply_text(help_message)
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming text messages."""
-    user_message = update.message.text
-    await update.message.chat.send_action("typing")
-    response = await call_glm_api(user_message)
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear conversation memory for this user."""
+    user_id = update.effective_user.id
+    conversation_memory[user_id].clear()
+    await update.message.reply_text("Conversation memory cleared. I won't remember anything we discussed before.")
 
+
+async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current memory usage."""
+    user_id = update.effective_user.id
+    mem_count = len(conversation_memory[user_id])
+    await update.message.reply_text(f"I'm remembering {mem_count} messages from our conversation (limit: {MEMORY_LIMIT}).")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle incoming text messages with conversation memory."""
+    user_id = update.effective_user.id
+    user_message = update.message.text
+
+    await update.message.chat.send_action("typing")
+
+    # Get conversation history for this user
+    history = conversation_memory[user_id]
+
+    # Call API with conversation history
+    response = await call_glm_api(user_message, history)
+
+    # Store user message in memory
+    conversation_memory[user_id].append({"role": "user", "content": user_message})
+
+    # Store assistant response in memory
+    conversation_memory[user_id].append({"role": "assistant", "content": response})
+
+    # Trim to memory limit (keep most recent)
+    if len(conversation_memory[user_id]) > MEMORY_LIMIT * 2:  # *2 because we store both user and assistant
+        # Remove oldest messages (2 at a time - user + assistant pair)
+        conversation_memory[user_id] = conversation_memory[user_id][-MEMORY_LIMIT * 2:]
+
+    # Send response (handle Telegram's 4096 char limit)
     if len(response) > 4096:
         for i in range(0, len(response), 4096):
             await update.message.reply_text(response[i:i+4096])
@@ -118,6 +168,8 @@ def main() -> None:
 
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("clear", clear_command))
+        application.add_handler(CommandHandler("memory", memory_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
         application.add_error_handler(error_handler)
