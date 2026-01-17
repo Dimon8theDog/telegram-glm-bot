@@ -1,0 +1,8 @@
+name: telegram-glm-bot
+version: "1.0"
+services:
+  - name: bot
+    instance_type: nano
+    type: worker
+    build_command: pip install -r requirements.txt
+    run_command: python bot.py
