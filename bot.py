@@ -25,8 +25,8 @@ GLM_API_KEY = os.getenv("GLM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
-# Try different model names - GLM might have different naming
-MODEL_NAME = os.getenv("GLM_MODEL", "glm-4-flash")  # Using a more common model name
+# GLM 4.7 Coding model name
+MODEL_NAME = os.getenv("GLM_MODEL", "glm-4.7")
 
 logger.info(f"GLM_API_KEY set: {bool(GLM_API_KEY)}")
 logger.info(f"TELEGRAM_BOT_TOKEN set: {bool(TELEGRAM_BOT_TOKEN)}")
@@ -98,50 +98,34 @@ async def call_glm_api(prompt: str) -> str:
         "Content-Type": "application/json"
     }
 
-    # Try different model names if one fails
-    models_to_try = [
-        MODEL_NAME,
-        "glm-4-flash",
-        "glm-4-plus",
-        "glm-4",
-        "chatglm3-6b"
-    ]
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 4096
+    }
 
-    for model in models_to_try:
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 4096
-        }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(GLM_API_URL, headers=headers, json=payload)
 
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(GLM_API_URL, headers=headers, json=payload)
+            logger.info(f"API response status: {response.status_code}")
 
-                logger.info(f"API response status: {response.status_code}")
-                logger.info(f"API response: {response.text[:500]}")
-
-                if response.status_code == 200:
-                    data = response.json()
-                    if "choices" in data and len(data["choices"]) > 0:
-                        return data["choices"][0]["message"]["content"]
-                    else:
-                        return f"Error: Unexpected response format: {data}"
-                elif response.status_code == 400:
-                    # Try next model
-                    logger.warning(f"Model {model} returned 400, trying next...")
-                    continue
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    return data["choices"][0]["message"]["content"]
                 else:
-                    return f"HTTP Error {response.status_code}: {response.text[:200]}"
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP Error with model {model}: {e}")
-            continue
-        except Exception as e:
-            logger.error(f"Error with model {model}: {e}")
-            continue
-
-    return "Error: All models failed. Check your API key and model name."
+                    return f"Error: Unexpected response format: {data}"
+            else:
+                logger.error(f"API response: {response.text}")
+                return f"HTTP Error {response.status_code}: {response.text}"
+    except httpx.HTTPError as e:
+        logger.error(f"HTTP Error: {e}")
+        return f"HTTP Error: {str(e)}"
+    except Exception as e:
+        logger.error(f"Error calling GLM API: {e}")
+        return f"Error: {str(e)}"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
