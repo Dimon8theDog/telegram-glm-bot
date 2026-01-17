@@ -1,16 +1,28 @@
 import os
+import sys
 import asyncio
+import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import httpx
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-
-# GLM 4.7 Coding Model
 MODEL_NAME = "glm-4.7-coding"
+
+# Log configuration (without exposing secrets)
+logger.info(f"GLM_API_KEY set: {bool(GLM_API_KEY)}")
+logger.info(f"TELEGRAM_BOT_TOKEN set: {bool(TELEGRAM_BOT_TOKEN)}")
 
 
 async def call_glm_api(prompt: str) -> str:
@@ -22,12 +34,7 @@ async def call_glm_api(prompt: str) -> str:
 
     payload = {
         "model": MODEL_NAME,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
         "max_tokens": 4096
     }
@@ -38,14 +45,15 @@ async def call_glm_api(prompt: str) -> str:
             response.raise_for_status()
             data = response.json()
 
-            # Extract the response content
             if "choices" in data and len(data["choices"]) > 0:
                 return data["choices"][0]["message"]["content"]
             else:
                 return "Error: No response from GLM API"
     except httpx.HTTPError as e:
+        logger.error(f"HTTP Error: {e}")
         return f"HTTP Error: {str(e)}"
     except Exception as e:
+        logger.error(f"Error calling GLM API: {e}")
         return f"Error: {str(e)}"
 
 
@@ -76,40 +84,46 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming text messages."""
     user_message = update.message.text
-
-    # Send typing indicator
     await update.message.chat.send_action("typing")
-
-    # Get response from GLM API
     response = await call_glm_api(user_message)
 
-    # Send response (Telegram has a 4096 character limit per message)
     if len(response) > 4096:
-        # Split into chunks if too long
         for i in range(0, len(response), 4096):
             await update.message.reply_text(response[i:i+4096])
     else:
         await update.message.reply_text(response)
 
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors caused by updates."""
+    logger.error(f"Update {update} caused error {context.error}")
+
+
 def main() -> None:
     """Start the bot."""
+    logger.info("Starting bot...")
+
     if not GLM_API_KEY:
-        raise ValueError("GLM_API_KEY environment variable is not set")
+        logger.error("GLM_API_KEY environment variable is not set!")
+        sys.exit(1)
     if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set")
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
+        sys.exit(1)
 
-    # Create the Application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    try:
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Register handlers
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Start the bot
-    print("Bot is running...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        application.add_error_handler(error_handler)
+
+        logger.info("Bot is running...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
