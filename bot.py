@@ -4,7 +4,7 @@ import asyncio
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from zhipuai import ZhipuAI
+from zai import ZaiClient
 
 # Set up logging
 logging.basicConfig(
@@ -25,12 +25,12 @@ logger.info(f"Using model: {MODEL_NAME}")
 
 
 async def call_glm_api(prompt: str) -> str:
-    """Call GLM API with the given prompt using official SDK."""
+    """Call GLM API with the given prompt using official zai-sdk for Coding Plan."""
     if not GLM_API_KEY:
         return "Error: GLM_API_KEY not configured"
 
     try:
-        client = ZhipuAI(api_key=GLM_API_KEY)
+        client = ZaiClient(api_key=GLM_API_KEY)
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
