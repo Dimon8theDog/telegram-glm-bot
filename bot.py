@@ -2,6 +2,12 @@ import os
 import sys
 import asyncio
 import logging
+import time
+import hmac
+import hashlib
+import base64
+import json
+from typing import Optional
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import httpx
@@ -18,50 +24,131 @@ logger = logging.getLogger(__name__)
 GLM_API_KEY = os.getenv("GLM_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GLM_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-MODEL_NAME = "glm-4.7-coding"
 
-# Log configuration (without exposing secrets)
+# Try different model names - GLM might have different naming
+MODEL_NAME = os.getenv("GLM_MODEL", "glm-4-flash")  # Using a more common model name
+
 logger.info(f"GLM_API_KEY set: {bool(GLM_API_KEY)}")
 logger.info(f"TELEGRAM_BOT_TOKEN set: {bool(TELEGRAM_BOT_TOKEN)}")
+logger.info(f"Using model: {MODEL_NAME}")
+
+
+def generate_glm_token(api_key: str, exp_seconds: int = 3600) -> str:
+    """
+    Generate JWT token for GLM API.
+    GLM API key format: id.secret
+    """
+    try:
+        parts = api_key.split(".")
+        if len(parts) != 2:
+            logger.warning("API key doesn't match expected 'id.secret' format, using as-is")
+            return api_key
+
+        api_id, api_secret = parts
+
+        # Header
+        header = {
+            "alg": "HS256",
+            "sign_type": "SIGN"
+        }
+
+        # Payload
+        now = int(time.time())
+        payload = {
+            "api_key": api_id,
+            "exp": now + exp_seconds,
+            "timestamp": now
+        }
+
+        # Encode header and payload
+        header_encoded = base64.urlsafe_b64encode(
+            json.dumps(header, separators=(',', ':')).encode()
+        ).rstrip(b'=').decode()
+
+        payload_encoded = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(',', ':')).encode()
+        ).rstrip(b'=').decode()
+
+        # Signature
+        message = f"{header_encoded}.{payload_encoded}"
+        signature = hmac.new(
+            api_secret.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).digest()
+
+        signature_encoded = base64.urlsafe_b64encode(signature).rstrip(b'=').decode()
+
+        return f"{message}.{signature_encoded}"
+    except Exception as e:
+        logger.error(f"Error generating token: {e}")
+        return api_key
 
 
 async def call_glm_api(prompt: str) -> str:
-    """Call GLM 4.7 Coding API with the given prompt."""
+    """Call GLM API with the given prompt."""
+    if not GLM_API_KEY:
+        return "Error: GLM_API_KEY not configured"
+
+    # Generate JWT token
+    token = generate_glm_token(GLM_API_KEY)
+
     headers = {
-        "Authorization": f"Bearer {GLM_API_KEY}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 4096
-    }
+    # Try different model names if one fails
+    models_to_try = [
+        MODEL_NAME,
+        "glm-4-flash",
+        "glm-4-plus",
+        "glm-4",
+        "chatglm3-6b"
+    ]
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(GLM_API_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+    for model in models_to_try:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 4096
+        }
 
-            if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0]["message"]["content"]
-            else:
-                return "Error: No response from GLM API"
-    except httpx.HTTPError as e:
-        logger.error(f"HTTP Error: {e}")
-        return f"HTTP Error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error calling GLM API: {e}")
-        return f"Error: {str(e)}"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(GLM_API_URL, headers=headers, json=payload)
+
+                logger.info(f"API response status: {response.status_code}")
+                logger.info(f"API response: {response.text[:500]}")
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if "choices" in data and len(data["choices"]) > 0:
+                        return data["choices"][0]["message"]["content"]
+                    else:
+                        return f"Error: Unexpected response format: {data}"
+                elif response.status_code == 400:
+                    # Try next model
+                    logger.warning(f"Model {model} returned 400, trying next...")
+                    continue
+                else:
+                    return f"HTTP Error {response.status_code}: {response.text[:200]}"
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP Error with model {model}: {e}")
+            continue
+        except Exception as e:
+            logger.error(f"Error with model {model}: {e}")
+            continue
+
+    return "Error: All models failed. Check your API key and model name."
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
     welcome_message = (
-        "Hello! I'm a bot powered by GLM 4.7 Coding model.\n\n"
-        "Just send me a message and I'll respond using the GLM API.\n\n"
+        "Hello! I'm a bot powered by GLM API.\n\n"
+        "Just send me a message and I'll respond.\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
         "/help - Show help message"
@@ -72,7 +159,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /help command."""
     help_message = (
-        "I can help you with coding questions using the GLM 4.7 Coding model.\n\n"
+        "I can help you with coding questions using the GLM API.\n\n"
         "Just send me any coding question or request, and I'll do my best to help!\n\n"
         "Commands:\n"
         "/start - Start the bot\n"
